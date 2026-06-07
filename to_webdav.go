@@ -23,7 +23,7 @@ func NewFS(fs afero.Fs) webdav.FileSystem {
 	return &aferoFS{fs: fs}
 }
 
-// aferoFS adapts afero.Fs → webdav.FileSystem.
+// aferoFS adapts afero.Fs to webdav.FileSystem.
 type aferoFS struct {
 	fs afero.Fs
 }
@@ -74,8 +74,6 @@ func (a *aferoFS) Rename(_ context.Context, oldName, newName string) error {
 func (a *aferoFS) Stat(_ context.Context, name string) (os.FileInfo, error) {
 	return a.fs.Stat(cleanPath(name))
 }
-
-// ── aferoWebdavFile ──────────────────────────────────────────────────────────
 
 // aferoWebdavFile wraps afero.File to satisfy webdav.File.
 //
