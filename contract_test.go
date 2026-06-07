@@ -338,3 +338,43 @@ func TestNew_TruncateShrinkKeepsOffset(t *testing.T) {
 		t.Fatalf("content = %q, want %q", got, "hello")
 	}
 }
+
+func TestNew_TruncateWriteOnlyShrinkWithOSBackedWebDAV(t *testing.T) {
+	afs := aferodav.New(webdav.Dir(t.TempDir()), context.Background())
+
+	f, err := afs.Create("/file.txt")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.WriteString("hello world"); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close created file: %v", err)
+	}
+
+	f, err = afs.OpenFile("/file.txt", os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile write-only: %v", err)
+	}
+	if err := f.Truncate(5); err != nil {
+		t.Fatalf("Truncate write-only shrink: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close truncated file: %v", err)
+	}
+
+	f, err = afs.Open("/file.txt")
+	if err != nil {
+		t.Fatalf("Open truncated file: %v", err)
+	}
+	defer f.Close()
+
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("content = %q, want %q", got, "hello")
+	}
+}

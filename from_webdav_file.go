@@ -207,21 +207,35 @@ func (f *davFile) Truncate(size int64) error {
 		return err
 	}
 
-	if _, err := f.wf.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	buf, err := io.ReadAll(io.LimitReader(f.wf, size))
+	buf, err := f.readPrefix(size)
 	if err != nil {
 		return err
-	}
-	if int64(len(buf)) != size {
-		return io.ErrUnexpectedEOF
 	}
 	if err := f.rewrite(buf); err != nil {
 		return err
 	}
 	_, err = f.wf.Seek(offset, io.SeekStart)
 	return err
+}
+
+func (f *davFile) readPrefix(size int64) ([]byte, error) {
+	reader, err := f.fs.OpenFile(f.ctx, f.name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	buf, readErr := io.ReadAll(io.LimitReader(reader, size))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(buf)) != size {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return buf, nil
 }
 
 func (f *davFile) rewrite(data []byte) error {

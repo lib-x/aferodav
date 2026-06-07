@@ -23,7 +23,7 @@ func NewFS(fs afero.Fs, opts ...FSOption) webdav.FileSystem {
 	config := fsOptions{}
 	for _, opt := range opts {
 		if opt != nil {
-			opt(&config)
+			opt.apply(&config)
 		}
 	}
 	return &aferoFS{
@@ -33,7 +33,15 @@ func NewFS(fs afero.Fs, opts ...FSOption) webdav.FileSystem {
 }
 
 // FSOption configures the afero-to-WebDAV adapter.
-type FSOption func(*fsOptions)
+type FSOption interface {
+	apply(*fsOptions)
+}
+
+type fsOption func(*fsOptions)
+
+func (f fsOption) apply(opts *fsOptions) {
+	f(opts)
+}
 
 type fsOptions struct {
 	autoMkdirParents bool
@@ -43,9 +51,9 @@ type fsOptions struct {
 // and Rename. NewFS does not enable this by default because webdav.FileSystem
 // methods are expected to follow os package semantics.
 func WithAutoMkdirParents() FSOption {
-	return func(opts *fsOptions) {
+	return fsOption(func(opts *fsOptions) {
 		opts.autoMkdirParents = true
-	}
+	})
 }
 
 // aferoFS adapts afero.Fs to webdav.FileSystem.
