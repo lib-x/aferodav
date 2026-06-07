@@ -55,11 +55,19 @@ Any `afero.Fs` works with `NewFS`:
 | Feature | New (webdav→afero) | NewFS (afero→webdav) |
 |---|---|---|
 | `MkdirAll` | Emulated via repeated `Mkdir` | Delegates to `afero.Fs.MkdirAll` |
-| Auto-create parent dirs | — | On `OpenFile(O_CREATE)` and `Rename` |
-| `ReadAt` / `WriteAt` | Emulated via `Seek` + `Read`/`Write` | Delegates to afero |
+| Auto-create parent dirs | — | Disabled by default; enable with `WithAutoMkdirParents()` |
+| `ReadAt` / `WriteAt` | Emulated via locked `Seek` + `Read`/`Write` | Delegates to afero |
 | `Truncate` | Emulated (shrink: copy+rewrite) | Delegates to afero |
 | `Sync` | No-op | Delegates to afero |
-| `Chmod` / `Chown` / `Chtimes` | No-op (not in WebDAV) | — |
+| `Chmod` / `Chown` / `Chtimes` | Unsupported (not in WebDAV) | — |
+
+```go
+// Optional convenience mode: create missing parents on WebDAV create/rename.
+handler := &webdav.Handler{
+    FileSystem: aferodav.NewFS(afs, aferodav.WithAutoMkdirParents()),
+    LockSystem: webdav.NewMemLS(),
+}
+```
 
 ## Running the example
 

@@ -13,8 +13,10 @@ package aferodav
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path"
+	"syscall"
 	"time"
 
 	"github.com/spf13/afero"
@@ -103,19 +105,32 @@ func (d *davFs) OpenFile(name string, flag int, perm os.FileMode) (afero.File, e
 	if err != nil {
 		return nil, err
 	}
-	return &davFile{wf: wf, name: p, fs: d.fs, ctx: d.ctx}, nil
+	return &davFile{wf: wf, name: p, fs: d.fs, ctx: d.ctx, flag: flag}, nil
 }
 
-// Remove implements afero.Fs. WebDAV RemoveAll on a file behaves like Remove.
+// Remove implements afero.Fs.
 func (d *davFs) Remove(name string) error {
 	p := cleanPath(name)
-	// Guard: do not remove a directory with Remove (mimic os.Remove behaviour).
 	info, err := d.fs.Stat(d.ctx, p)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		return &os.PathError{Op: "remove", Path: p, Err: os.ErrInvalid}
+		dir, err := d.fs.OpenFile(d.ctx, p, os.O_RDONLY, 0)
+		if err != nil {
+			return err
+		}
+		_, readErr := dir.Readdir(1)
+		closeErr := dir.Close()
+		if readErr == nil {
+			return &os.PathError{Op: "remove", Path: p, Err: syscall.ENOTEMPTY}
+		}
+		if !errors.Is(readErr, io.EOF) {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
 	}
 	return d.fs.RemoveAll(d.ctx, p)
 }
@@ -139,12 +154,18 @@ func (d *davFs) Stat(name string) (os.FileInfo, error) {
 	return d.fs.Stat(d.ctx, cleanPath(name))
 }
 
-// Chmod is a no-op: WebDAV does not expose chmod semantics.
-func (d *davFs) Chmod(name string, mode os.FileMode) error { return nil }
+// Chmod is unsupported: WebDAV does not expose chmod semantics.
+func (d *davFs) Chmod(name string, mode os.FileMode) error {
+	return &os.PathError{Op: "chmod", Path: cleanPath(name), Err: os.ErrPermission}
+}
 
-// Chown is a no-op: WebDAV does not expose chown semantics.
-func (d *davFs) Chown(name string, uid, gid int) error { return nil }
+// Chown is unsupported: WebDAV does not expose chown semantics.
+func (d *davFs) Chown(name string, uid, gid int) error {
+	return &os.PathError{Op: "chown", Path: cleanPath(name), Err: os.ErrPermission}
+}
 
-// Chtimes is a no-op for the same reason (WebDAV PROPPATCH could implement
+// Chtimes is unsupported for the same reason (WebDAV PROPPATCH could implement
 // this but most backends don't support it reliably via the FileSystem API).
-func (d *davFs) Chtimes(name string, atime time.Time, mtime time.Time) error { return nil }
+func (d *davFs) Chtimes(name string, atime time.Time, mtime time.Time) error {
+	return &os.PathError{Op: "chtimes", Path: cleanPath(name), Err: os.ErrPermission}
+}

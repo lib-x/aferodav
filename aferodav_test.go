@@ -193,13 +193,24 @@ func TestNew_Remove(t *testing.T) {
 	}
 }
 
-func TestNew_RemoveDir_Fails(t *testing.T) {
+func TestNew_RemoveEmptyDir(t *testing.T) {
 	afs := aferodav.New(memWebdavFS(), context.Background())
 	afs.Mkdir("/mydir", 0755)
 
-	// Remove on a directory should fail (like os.Remove).
+	if err := afs.Remove("/mydir"); err != nil {
+		t.Fatalf("Remove empty directory: %v", err)
+	}
+	if _, err := afs.Stat("/mydir"); !os.IsNotExist(err) {
+		t.Error("expected not-exist after Remove")
+	}
+}
+
+func TestNew_RemoveNonEmptyDirFails(t *testing.T) {
+	afs := aferodav.New(memWebdavFS(), context.Background())
+	afs.MkdirAll("/mydir/sub", 0755)
+
 	if err := afs.Remove("/mydir"); err == nil {
-		t.Error("expected error removing directory with Remove")
+		t.Error("expected error removing non-empty directory with Remove")
 	}
 }
 
@@ -330,7 +341,7 @@ func TestNewFS_Rename(t *testing.T) {
 }
 
 func TestNewFS_AutoMkdirOnCreate(t *testing.T) {
-	wfs := aferodav.NewFS(memAferoFS())
+	wfs := aferodav.NewFS(memAferoFS(), aferodav.WithAutoMkdirParents())
 	ctx := context.Background()
 
 	f, err := wfs.OpenFile(ctx, "/deep/nested/file.txt", os.O_CREATE|os.O_WRONLY, 0644)

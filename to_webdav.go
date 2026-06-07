@@ -19,13 +19,39 @@ import (
 //	    FileSystem: aferodav.NewFS(afs),
 //	    LockSystem: webdav.NewMemLS(),
 //	}
-func NewFS(fs afero.Fs) webdav.FileSystem {
-	return &aferoFS{fs: fs}
+func NewFS(fs afero.Fs, opts ...FSOption) webdav.FileSystem {
+	config := fsOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&config)
+		}
+	}
+	return &aferoFS{
+		fs:               fs,
+		autoMkdirParents: config.autoMkdirParents,
+	}
+}
+
+// FSOption configures the afero-to-WebDAV adapter.
+type FSOption func(*fsOptions)
+
+type fsOptions struct {
+	autoMkdirParents bool
+}
+
+// WithAutoMkdirParents creates missing parent directories on OpenFile(O_CREATE)
+// and Rename. NewFS does not enable this by default because webdav.FileSystem
+// methods are expected to follow os package semantics.
+func WithAutoMkdirParents() FSOption {
+	return func(opts *fsOptions) {
+		opts.autoMkdirParents = true
+	}
 }
 
 // aferoFS adapts afero.Fs to webdav.FileSystem.
 type aferoFS struct {
-	fs afero.Fs
+	fs               afero.Fs
+	autoMkdirParents bool
 }
 
 // Mkdir implements webdav.FileSystem.
@@ -37,8 +63,7 @@ func (a *aferoFS) Mkdir(_ context.Context, name string, perm os.FileMode) error 
 func (a *aferoFS) OpenFile(_ context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	p := cleanPath(name)
 
-	// Auto-create parent directories when creating a new file.
-	if flag&os.O_CREATE != 0 {
+	if a.autoMkdirParents && flag&os.O_CREATE != 0 {
 		if dir := path.Dir(p); dir != "/" && dir != "." {
 			if err := a.fs.MkdirAll(dir, 0755); err != nil {
 				return nil, err
@@ -61,10 +86,11 @@ func (a *aferoFS) RemoveAll(_ context.Context, name string) error {
 // Rename implements webdav.FileSystem.
 func (a *aferoFS) Rename(_ context.Context, oldName, newName string) error {
 	newP := cleanPath(newName)
-	// Auto-create parent directories of the destination.
-	if dir := path.Dir(newP); dir != "/" && dir != "." {
-		if err := a.fs.MkdirAll(dir, 0755); err != nil {
-			return err
+	if a.autoMkdirParents {
+		if dir := path.Dir(newP); dir != "/" && dir != "." {
+			if err := a.fs.MkdirAll(dir, 0755); err != nil {
+				return err
+			}
 		}
 	}
 	return a.fs.Rename(cleanPath(oldName), newP)

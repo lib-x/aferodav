@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"os"
+	"sync"
 
+	"github.com/spf13/afero"
 	"golang.org/x/net/webdav"
 )
 
@@ -14,28 +16,98 @@ const zeroChunkSize = 32 * 1024
 //
 // webdav.File = http.File (Close/Read/Seek/Readdir/Stat) + io.Writer.
 //
-// ReadAt and WriteAt are emulated via Seek+Read/Write. They preserve the
-// original offset, but callers should not use them concurrently on one handle.
-// Truncate is emulated by rewriting the file because WebDAV has no truncate
-// primitive.
+// ReadAt and WriteAt are emulated via Seek+Read/Write and protected by mu so
+// they satisfy io.ReaderAt/io.WriterAt offset semantics. Truncate is emulated by
+// rewriting the file because WebDAV has no truncate primitive.
 type davFile struct {
-	wf   webdav.File
-	name string
-	fs   webdav.FileSystem
-	ctx  context.Context
+	mu     sync.Mutex
+	wf     webdav.File
+	name   string
+	fs     webdav.FileSystem
+	ctx    context.Context
+	flag   int
+	closed bool
 }
 
-func (f *davFile) Close() error                                 { return f.wf.Close() }
-func (f *davFile) Read(p []byte) (int, error)                   { return f.wf.Read(p) }
-func (f *davFile) Seek(offset int64, whence int) (int64, error) { return f.wf.Seek(offset, whence) }
-func (f *davFile) Write(p []byte) (int, error)                  { return f.wf.Write(p) }
-func (f *davFile) Readdir(count int) ([]os.FileInfo, error)     { return f.wf.Readdir(count) }
-func (f *davFile) Stat() (os.FileInfo, error)                   { return f.wf.Stat() }
-func (f *davFile) Name() string                                 { return f.name }
+const accessModeMask = os.O_WRONLY | os.O_RDWR
+
+func (f *davFile) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return afero.ErrFileClosed
+	}
+	err := f.wf.Close()
+	f.closed = true
+	return err
+}
+
+func (f *davFile) Read(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireReadable("read"); err != nil {
+		return 0, err
+	}
+	return f.wf.Read(p)
+}
+
+func (f *davFile) Seek(offset int64, whence int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireOpen(); err != nil {
+		return 0, err
+	}
+	return f.wf.Seek(offset, whence)
+}
+
+func (f *davFile) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireWritable("write"); err != nil {
+		return 0, err
+	}
+	n, err := f.wf.Write(p)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+func (f *davFile) Readdir(count int) ([]os.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireReadable("readdir"); err != nil {
+		return nil, err
+	}
+	return f.wf.Readdir(count)
+}
+
+func (f *davFile) Stat() (os.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireOpen(); err != nil {
+		return nil, err
+	}
+	return f.wf.Stat()
+}
+
+func (f *davFile) Name() string { return f.name }
 
 // ReadAt implements io.ReaderAt by seeking to offset, reading, then restoring
 // the original position.
 func (f *davFile) ReadAt(p []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireReadable("read"); err != nil {
+		return 0, err
+	}
 	cur, err := f.wf.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, err
@@ -56,6 +128,12 @@ func (f *davFile) ReadAt(p []byte, off int64) (int, error) {
 // WriteAt implements io.WriterAt by seeking to offset, writing, then restoring
 // the original position.
 func (f *davFile) WriteAt(p []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireWritable("write"); err != nil {
+		return 0, err
+	}
 	cur, err := f.wf.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, err
@@ -75,6 +153,12 @@ func (f *davFile) WriteAt(p []byte, off int64) (int, error) {
 
 // Readdirnames implements afero.File by delegating to Readdir.
 func (f *davFile) Readdirnames(n int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireReadable("readdirnames"); err != nil {
+		return nil, err
+	}
 	infos, err := f.wf.Readdir(n)
 	if err != nil {
 		return nil, err
@@ -88,6 +172,12 @@ func (f *davFile) Readdirnames(n int) ([]string, error) {
 
 // Truncate implements afero.File.
 func (f *davFile) Truncate(size int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.requireWritable("truncate"); err != nil {
+		return err
+	}
 	if size < 0 {
 		return &os.PathError{Op: "truncate", Path: f.name, Err: os.ErrInvalid}
 	}
@@ -152,7 +242,7 @@ func (f *davFile) rewrite(data []byte) error {
 		return closeErr
 	}
 
-	reopened, err := f.fs.OpenFile(f.ctx, f.name, os.O_RDWR, 0666)
+	reopened, err := f.fs.OpenFile(f.ctx, f.name, f.reopenFlag(), 0666)
 	if err != nil {
 		return err
 	}
@@ -180,10 +270,46 @@ func writeZeros(w io.Writer, n int64) error {
 	return nil
 }
 
+func (f *davFile) requireOpen() error {
+	if f.closed {
+		return afero.ErrFileClosed
+	}
+	return nil
+}
+
+func (f *davFile) requireReadable(op string) error {
+	if err := f.requireOpen(); err != nil {
+		return err
+	}
+	if f.flag&accessModeMask == os.O_WRONLY {
+		return &os.PathError{Op: op, Path: f.name, Err: os.ErrPermission}
+	}
+	return nil
+}
+
+func (f *davFile) requireWritable(op string) error {
+	if err := f.requireOpen(); err != nil {
+		return err
+	}
+	if f.flag&accessModeMask == os.O_RDONLY {
+		return &os.PathError{Op: op, Path: f.name, Err: os.ErrPermission}
+	}
+	return nil
+}
+
+func (f *davFile) reopenFlag() int {
+	return f.flag & (accessModeMask | os.O_APPEND)
+}
+
 // Sync is a no-op: WebDAV has no fsync equivalent.
-func (f *davFile) Sync() error { return nil }
+func (f *davFile) Sync() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.requireOpen()
+}
 
 // WriteString implements afero.File.
 func (f *davFile) WriteString(s string) (int, error) {
-	return f.wf.Write([]byte(s))
+	return f.Write([]byte(s))
 }
